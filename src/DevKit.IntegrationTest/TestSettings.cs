@@ -1,7 +1,7 @@
 ﻿//----------------------------------------------------------------------- 
-// ETP DevKit, 1.1
+// ETP DevKit, 1.2
 //
-// Copyright 2016 Energistics
+// Copyright 2018 Energistics
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,6 +16,7 @@
 // limitations under the License.
 //-----------------------------------------------------------------------
 
+using Energistics.Etp.Common.Datatypes;
 using Energistics.IntegrationTest;
 
 namespace Energistics
@@ -56,9 +57,29 @@ namespace Energistics
         public static string EtpVersion = Settings.Default.EtpVersion;
 
         /// <summary>
+        /// The default ETP sub protocol
+        /// </summary>
+        public static string EtpSubProtocol = Settings.Default.EtpSubProtocol;
+
+        /// <summary>
         /// The default timeout in milliseconds
         /// </summary>
         public static int DefaultTimeoutInMilliseconds = 5000;
+
+        /// <summary>
+        /// The websocket type.
+        /// </summary>
+        public static WebSocketType WebSocketType = Etp.Properties.Settings.Default.DefaultWebSocketType;
+
+        /// <summary>
+        /// The username for the proxy.
+        /// </summary>
+        public static string ProxyUsername = Settings.Default.ProxyUsername;
+
+        /// <summary>
+        /// The password for the proxy.
+        /// </summary>
+        public static string ProxyPassword = Settings.Default.ProxyPassword;
 
         /// <summary>
         /// Resets any modified test settings.
@@ -72,6 +93,10 @@ namespace Energistics
             Password = Settings.Default.Password;
             EtpVersion = Settings.Default.EtpVersion;
             DefaultTimeoutInMilliseconds = 5000;
+            ProxyUsername = Settings.Default.ProxyUsername;
+            ProxyPassword = Settings.Default.ProxyPassword;
+
+            WebSocketType = Etp.Properties.Settings.Default.DefaultWebSocketType;
         }
     }
 }

@@ -1,7 +1,7 @@
 ﻿//----------------------------------------------------------------------- 
-// ETP DevKit, 1.1
+// ETP DevKit, 1.2
 //
-// Copyright 2016 Energistics
+// Copyright 2018 Energistics
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,10 +18,10 @@
 
 using System;
 using System.Collections.Generic;
-using Energistics.Datatypes;
+using Energistics.Etp.Common.Datatypes;
 using log4net;
 
-namespace Energistics.Common
+namespace Energistics.Etp.Common
 {
     /// <summary>
     /// Provides common functionality for ETP session and protocol handler implementations.
@@ -39,7 +39,7 @@ namespace Energistics.Common
             Logger = LogManager.GetLogger(GetType());
             SupportedObjects = new List<string>();
             RegisteredHandlers = new Dictionary<Type, Type>();
-            RegisteredFactories = new Dictionary<Type, Func<object>>();
+            RegisteredFactories = new Dictionary<Type, Func<IProtocolHandler>>();
         }
 
         /// <summary>
@@ -70,7 +70,7 @@ namespace Energistics.Common
         /// Gets the collection of registered protocol handler factories.
         /// </summary>
         /// <value>The registered protocol handler factories.</value>
-        protected IDictionary<Type, Func<object>> RegisteredFactories { get; }
+        protected IDictionary<Type, Func<IProtocolHandler>> RegisteredFactories { get; }
 
         /// <summary>
         /// Logs the specified message using the Output delegate, if available.
@@ -99,7 +99,7 @@ namespace Energistics.Common
         /// </summary>
         /// <param name="requestedProtocols">The requested protocols.</param>
         /// <param name="supportedProtocols">The supported protocols.</param>
-        public virtual void OnSessionOpened(IList<SupportedProtocol> requestedProtocols, IList<SupportedProtocol> supportedProtocols)
+        public virtual void OnSessionOpened(IList<ISupportedProtocol> requestedProtocols, IList<ISupportedProtocol> supportedProtocols)
         {
         }
 
@@ -127,7 +127,7 @@ namespace Energistics.Common
         /// <param name="factory">The factory.</param>
         public virtual void Register<TContract>(Func<TContract> factory) where TContract : IProtocolHandler
         {
-            RegisteredFactories[typeof(TContract)] = () => factory();
+            RegisteredFactories[typeof(TContract)] = factory as Func<IProtocolHandler>;
             Register(typeof(TContract), typeof(TContract));
         }
 
@@ -199,15 +199,16 @@ namespace Energistics.Common
         {
             if (!_disposedValue)
             {
+                Logger.Trace($"Disposing {GetType().Name}");
                 if (disposing)
                 {
                     // NOTE: dispose managed state (managed objects).
                     RegisteredHandlers.Clear();
+                    RegisteredFactories.Clear();
                 }
 
                 // NOTE: free unmanaged resources (unmanaged objects) and override a finalizer below.
                 // NOTE: set large fields to null.
-                Logger = null;
 
                 _disposedValue = true;
             }

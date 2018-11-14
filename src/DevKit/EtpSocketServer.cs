@@ -1,7 +1,7 @@
 ﻿//----------------------------------------------------------------------- 
-// ETP DevKit, 1.1
+// ETP DevKit, 1.2
 //
-// Copyright 2016 Energistics
+// Copyright 2018 Energistics
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,28 +16,17 @@
 // limitations under the License.
 //-----------------------------------------------------------------------
 
-using System;
-using Energistics.Common;
-using Energistics.Properties;
-using Energistics.Protocol.Core;
-using SuperSocket.SocketBase;
-using SuperSocket.SocketBase.Config;
-using SuperWebSocket;
-using SuperWebSocket.SubProtocol;
 
-namespace Energistics
+using System;
+
+namespace Energistics.Etp
 {
     /// <summary>
-    /// A wrapper for the SuperWebSocket library providing a base ETP server implementation.
+    /// An ETP server session implementation that can be used with .NET WebSockets.
     /// </summary>
-    /// <seealso cref="Energistics.Common.EtpBase" />
-    public class EtpSocketServer : EtpBase
+    [Obsolete("Use WebSocket4Net.EtpSelfHostedWebServer instead.")]
+    public class EtpSocketServer : WebSocket4Net.EtpSelfHostedWebServer
     {
-        private static readonly string EtpSubProtocolName = Settings.Default.EtpSubProtocolName;
-        private static readonly object EtpSessionKey = typeof(IEtpSession);
-        private WebSocketServer _server;
-        private object _sync = new object();
-
         /// <summary>
         /// Initializes a new instance of the <see cref="EtpSocketServer"/> class.
         /// </summary>
@@ -45,213 +34,8 @@ namespace Energistics
         /// <param name="application">The server application name.</param>
         /// <param name="version">The server application version.</param>
         public EtpSocketServer(int port, string application, string version)
+            : base(port, application, version)
         {
-            _server = new WebSocketServer(new BasicSubProtocol(EtpSubProtocolName));
-            _server.Setup(new ServerConfig()
-            {
-                Ip = "Any",
-                Port = port,
-                MaxRequestLength = int.MaxValue,
-            });
-
-            _server.NewSessionConnected += OnNewSessionConnected;
-            //_server.NewMessageReceived += OnNewMessageReceived;
-            _server.NewDataReceived += OnNewDataReceived;
-            _server.SessionClosed += OnSessionClosed;
-
-            ApplicationName = application;
-            ApplicationVersion = version;
-            Register<ICoreServer, CoreServerHandler>();
-        }
-
-        /// <summary>
-        /// Gets the name of the application.
-        /// </summary>
-        /// <value>The name of the application.</value>
-        public string ApplicationName { get; private set; }
-
-        /// <summary>
-        /// Gets the application version.
-        /// </summary>
-        /// <value>The application version.</value>
-        public string ApplicationVersion { get; private set; }
-
-        /// <summary>
-        /// Gets a value indicating whether the WebSocket server is running.
-        /// </summary>
-        /// <value>
-        /// <c>true</c> if the WebSocket server is running; otherwise, <c>false</c>.
-        /// </value>
-        public bool IsRunning
-        {
-            get
-            {
-                CheckDisposed();
-                return _server.State == ServerState.Running;
-            }
-        }
-
-        /// <summary>
-        /// Occurs when an ETP session is connected.
-        /// </summary>
-        public event EventHandler<IEtpSession> SessionConnected;
-
-        /// <summary>
-        /// Occurs when an ETP session is closed.
-        /// </summary>
-        public event EventHandler<IEtpSession> SessionClosed;
-
-        /// <summary>
-        /// Starts the WebSocket server.
-        /// </summary>
-        public void Start()
-        {
-            if (!IsRunning)
-            {
-                _server.Start();
-            }
-        }
-
-        /// <summary>
-        /// Stops the WebSocket server.
-        /// </summary>
-        public void Stop()
-        {
-            if (IsRunning)
-            {
-                CloseSessions();
-                _server.Stop();
-            }
-        }
-
-        /// <summary>
-        /// Releases unmanaged and - optionally - managed resources.
-        /// </summary>
-        /// <param name="disposing"><c>true</c> to release both managed and unmanaged resources; <c>false</c> to release only unmanaged resources.</param>
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing && _server != null)
-            {
-                // Unregister event handlers
-                _server.NewSessionConnected -= OnNewSessionConnected;
-                //_server.NewMessageReceived -= OnNewMessageReceived;
-                _server.NewDataReceived -= OnNewDataReceived;
-                _server.SessionClosed -= OnSessionClosed;
-
-                Stop();
-                _server.Dispose();
-            }
-
-            _server = null;
-            base.Dispose(disposing);
-        }
-
-        /// <summary>
-        /// Called when a WebSocket session is connected.
-        /// </summary>
-        /// <param name="session">The session.</param>
-        private void OnNewSessionConnected(WebSocketSession session)
-        {
-            Logger.Debug(Log("[{0}] Socket session connected.", session.SessionID));
-
-            lock (_sync)
-            {
-                var etpServer = new EtpServer(session, ApplicationName, ApplicationVersion, null);
-                etpServer.SupportedObjects = SupportedObjects;
-                RegisterAll(etpServer);
-
-                session.Items[EtpSessionKey] = etpServer;
-                SessionConnected?.Invoke(this, etpServer);
-            }
-        }
-
-        /// <summary>
-        /// Called when a WebSocket session is closed.
-        /// </summary>
-        /// <param name="session">The session.</param>
-        /// <param name="value">The value.</param>
-        private void OnSessionClosed(WebSocketSession session, CloseReason value)
-        {
-            Logger.Debug(Log("[{0}] Socket session closed.", session.SessionID));
-
-            lock (_sync)
-            {
-                var etpSession = GetEtpSession(session);
-
-                if (etpSession != null)
-                {
-                    SessionClosed?.Invoke(this, etpSession);
-                    etpSession.Dispose();
-                    session.Items[EtpSessionKey] = null;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Called when a new message is received.
-        /// </summary>
-        /// <param name="session">The session.</param>
-        /// <param name="message">The message.</param>
-        private void OnNewMessageReceived(WebSocketSession session, string message)
-        {
-            var etpSession = GetEtpSession(session);
-            etpSession?.OnMessageReceived(message);
-        }
-
-        /// <summary>
-        /// Called when new WebSocket data is received.
-        /// </summary>
-        /// <param name="session">The WebSocket session.</param>
-        /// <param name="data">The data.</param>
-        private void OnNewDataReceived(WebSocketSession session, byte[] data)
-        {
-            var etpSession = GetEtpSession(session);
-            etpSession?.OnDataReceived(data);
-        }
-
-        /// <summary>
-        /// Closes all connected WebSocket sessions.
-        /// </summary>
-        private void CloseSessions()
-        {
-            CheckDisposed();
-            const string reason = "Server stopping";
-
-            lock (_sync)
-            {
-                foreach (var session in _server.GetAllSessions())
-                {
-                    var etpSession = GetEtpSession(session);
-                    session.Items[EtpSessionKey] = null;
-
-                    if (etpSession == null) continue;
-    
-                    SessionClosed?.Invoke(this, etpSession);
-                    etpSession.Close(reason);
-                    etpSession.Dispose();
-                }
-            }
-        }
-
-        /// <summary>
-        /// Gets the ETP session associated with the specified WebSocket session.
-        /// </summary>
-        /// <param name="session">The WebSocket session.</param>
-        /// <returns>The <see cref="IEtpSession"/> associated with the WebSocket session.</returns>
-        private IEtpSession GetEtpSession(WebSocketSession session)
-        {
-            IEtpSession etpSession = null;
-            object item;
-
-            lock (_sync)
-            {
-                if (session.Items.TryGetValue(EtpSessionKey, out item))
-                {
-                    etpSession = item as IEtpSession;
-                }
-            }
-
-            return etpSession;
         }
     }
 }

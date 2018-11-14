@@ -1,7 +1,7 @@
 ﻿//----------------------------------------------------------------------- 
-// ETP DevKit, 1.1
+// ETP DevKit, 1.2
 //
-// Copyright 2016 Energistics
+// Copyright 2018 Energistics
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -16,11 +16,12 @@
 // limitations under the License.
 //-----------------------------------------------------------------------
 
+using Energistics.Etp.Common;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Energistics
+namespace Energistics.Etp
 {
     /// <summary>
     /// Provides static helper methods that can be used to process ETP messages asynchronously.
@@ -33,14 +34,11 @@ namespace Energistics
         /// <param name="client">The client.</param>
         /// <param name="milliseconds">The timeout, in milliseconds.</param>
         /// <returns>An awaitable task.</returns>
-        public static async Task<bool> OpenAsync(this EtpClient client, int? milliseconds = null)
+        public static async Task<bool> OpenAsyncWithTimeout(this IEtpClient client, int? milliseconds = null)
         {
-            var task = new Task<bool>(() => client.IsOpen);
+            await client.OpenAsync().WaitAsync(milliseconds);
 
-            client.SocketOpened += (s, e) => task.Start();
-            client.Open();
-
-            return await task.WaitAsync(milliseconds);
+            return client.IsOpen;
         }
 
         /// <summary>

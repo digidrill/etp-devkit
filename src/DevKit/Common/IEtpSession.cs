@@ -1,7 +1,7 @@
 ﻿//----------------------------------------------------------------------- 
-// ETP DevKit, 1.1
+// ETP DevKit, 1.2
 //
-// Copyright 2016 Energistics
+// Copyright 2018 Energistics
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,10 +18,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Avro.Specific;
-using Energistics.Datatypes;
+using Energistics.Etp.Common.Datatypes;
 
-namespace Energistics.Common
+namespace Energistics.Etp.Common
 {
     /// <summary>
     /// Defines the properties and methods needed to manage an ETP session.
@@ -29,6 +30,21 @@ namespace Energistics.Common
     /// <seealso cref="System.IDisposable" />
     public interface IEtpSession : IDisposable
     {
+        /// <summary>
+        /// Gets the ETP version supported by this session.
+        /// </summary>
+        EtpVersion SupportedVersion { get; }
+
+        /// <summary>
+        /// Gets the version specific ETP adapter.
+        /// </summary>
+        IEtpAdapter Adapter { get; }
+
+        /// <summary>
+        /// Gets whether or not this is the client side of the session.
+        /// </summary>
+        bool IsClient { get; }
+
         /// <summary>
         /// Gets the name of the application.
         /// </summary>
@@ -46,6 +62,11 @@ namespace Energistics.Common
         /// </summary>
         /// <value>The session identifier.</value>
         string SessionId { get; set; }
+
+        /// <summary>
+        /// Gets or sets the supported compression type.
+        /// </summary>
+        string SupportedCompression { get; set; }
 
         /// <summary>
         /// Gets or sets the list of supported objects.
@@ -79,7 +100,7 @@ namespace Energistics.Common
         /// </summary>
         /// <param name="requestedProtocols">The requested protocols.</param>
         /// <param name="supportedProtocols">The supported protocols.</param>
-        void OnSessionOpened(IList<SupportedProtocol> requestedProtocols, IList<SupportedProtocol> supportedProtocols);
+        void OnSessionOpened(IList<ISupportedProtocol> requestedProtocols, IList<ISupportedProtocol> supportedProtocols);
 
         /// <summary>
         /// Called when the ETP session is closed.
@@ -106,14 +127,13 @@ namespace Energistics.Common
         /// <param name="body">The body.</param>
         /// <param name="onBeforeSend">Action called just before sending the message with the actual header having the definitive message ID.</param>
         /// <returns>The message identifier.</returns>
-        long SendMessage<T>(MessageHeader header, T body, Action<MessageHeader> onBeforeSend = null) where T : ISpecificRecord;
+        long SendMessage<T>(IMessageHeader header, T body, Action<IMessageHeader> onBeforeSend = null) where T : ISpecificRecord;
 
         /// <summary>
         /// Gets the supported protocols.
         /// </summary>
-        /// <param name="isSender">if set to <c>true</c> the current session is the sender.</param>
         /// <returns>A list of supported protocols.</returns>
-        IList<SupportedProtocol> GetSupportedProtocols(bool isSender = false);
+        IList<ISupportedProtocol> GetSupportedProtocols();
 
         /// <summary>
         /// Gets the registered protocol handler for the specified ETP interface.
@@ -134,5 +154,25 @@ namespace Energistics.Common
         /// </summary>
         /// <param name="reason">The reason.</param>
         void Close(string reason);
+
+        /// <summary>
+        /// Asynchronously closes the WebSocket connection for the specified reason.
+        /// </summary>
+        /// <param name="reason">The reason.</param>
+        Task CloseAsync(string reason);
+
+        /// <summary>
+        /// Registers a protocol handler for the specified contract type.
+        /// </summary>
+        /// <typeparam name="TContract">The type of the contract.</typeparam>
+        /// <typeparam name="THandler">The type of the handler.</typeparam>
+        void Register<TContract, THandler>() where TContract : IProtocolHandler where THandler : TContract;
+
+        /// <summary>
+        /// Registers a protocol handler factory for the specified contract type.
+        /// </summary>
+        /// <typeparam name="TContract">The type of the contract.</typeparam>
+        /// <param name="factory">The factory.</param>
+        void Register<TContract>(Func<TContract> factory) where TContract : IProtocolHandler;
     }
 }

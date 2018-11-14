@@ -1,7 +1,7 @@
 ﻿//----------------------------------------------------------------------- 
-// ETP DevKit, 1.1
+// ETP DevKit, 1.2
 //
-// Copyright 2016 Energistics
+// Copyright 2018 Energistics
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,41 +19,70 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 using Avro.IO;
 using Avro.Specific;
-using Energistics.Datatypes;
-using Energistics.Properties;
+using Energistics.Etp.Common.Datatypes;
+using Energistics.Etp.Properties;
 using Newtonsoft.Json.Linq;
 
-namespace Energistics.Common
+
+namespace Energistics.Etp.Common
 {
     /// <summary>
     /// Provides common functionality for all ETP sessions.
     /// </summary>
-    /// <seealso cref="Energistics.Common.EtpBase" />
-    /// <seealso cref="Energistics.Common.IEtpSession" />
+    /// <seealso cref="Energistics.Etp.Common.EtpBase" />
+    /// <seealso cref="Energistics.Etp.Common.IEtpSession" />
     public abstract class EtpSession : EtpBase, IEtpSession
     {
         private long _messageId;
         private bool? _isJsonEncoding;
-        private readonly object _sendLock = new object();
+        // Used to ensure only one thread at a time sends data over a websocket.
+        private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1);
+        // Used to ensure only one thread at a time manipulates the collection of handlers.
+        private readonly ReaderWriterLockSlim _handlersLock = new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
 
         /// <summary>
         /// Initializes a new instance of the <see cref="EtpSession"/> class.
         /// </summary>
+        /// <param name="etpVersion">The ETP version for the session.</param>
         /// <param name="application">The application name.</param>
         /// <param name="version">The application version.</param>
         /// <param name="headers">The WebSocket or HTTP headers.</param>
-        protected EtpSession(string application, string version, IDictionary<string, string> headers)
+        /// <param name="isClient">Whether or not this is the client-side of the session.</param>
+        protected EtpSession(EtpVersion etpVersion, string application, string version, IDictionary<string, string> headers, bool isClient)
         {
+            IsClient = isClient;
+
             Headers = headers ?? new Dictionary<string, string>();
-            Handlers = new Dictionary<object, IProtocolHandler>();
+            HandlersByType = new Dictionary<Type, IProtocolHandler>();
+            HandlersByProtocol = new Dictionary<int, IProtocolHandler>();
             ApplicationName = application;
             ApplicationVersion = version;
             ValidateHeaders();
+
+            Adapter = ResolveEtpAdapter(etpVersion);
+            Adapter.RegisterCore(this);
         }
+
+        /// <summary>
+        /// Gets the ETP version supported by this session.
+        /// </summary>
+        public EtpVersion SupportedVersion {  get { return Adapter.SupportedVersion; } }
+
+        /// <summary>
+        /// Gets the version specific ETP adapter.
+        /// </summary>
+        public IEtpAdapter Adapter { get; private set; }
+
+        /// <summary>
+        /// Gets whether or not this is the client-side of the session.
+        /// </summary>
+        public bool IsClient { get; private set; }
 
         /// <summary>
         /// Gets the name of the application.
@@ -72,6 +101,11 @@ namespace Energistics.Common
         /// </summary>
         /// <value>The session identifier.</value>
         public string SessionId { get; set; }
+
+        /// <summary>
+        /// Gets or sets the supported compression type.
+        /// </summary>
+        public string SupportedCompression { get; set; }
 
         /// <summary>
         /// Gets a value indicating whether the underlying websocket connection is open.
@@ -109,10 +143,16 @@ namespace Energistics.Common
         protected IDictionary<string, string> Headers { get; }
 
         /// <summary>
-        /// Gets the collection of registered protocol handlers.
+        /// Gets the collection of registered protocol handlers by Type.
         /// </summary>
         /// <value>The handlers.</value>
-        protected IDictionary<object, IProtocolHandler> Handlers { get; }
+        private IDictionary<Type, IProtocolHandler> HandlersByType { get; }
+
+        /// <summary>
+        /// Gets the collection of registered protocol handlers by protocol.
+        /// </summary>
+        /// <value>The handlers.</value>
+        private IDictionary<int, IProtocolHandler> HandlersByProtocol { get; }
 
         /// <summary>
         /// Gets the registered protocol handler for the specified ETP interface.
@@ -122,14 +162,20 @@ namespace Energistics.Common
         /// <exception cref="System.NotSupportedException"></exception>
         public T Handler<T>() where T : IProtocolHandler
         {
-            IProtocolHandler handler;
-
-            if (Handlers.TryGetValue(typeof(T), out handler) && handler is T)
+            try
             {
-                return (T)handler;
+                _handlersLock.TryEnterReadLock(-1);
+
+                IProtocolHandler handler;
+                if (HandlersByType.TryGetValue(typeof(T), out handler) && handler is T)
+                    return (T)handler;
+            }
+            finally
+            {
+                _handlersLock.ExitReadLock();
             }
 
-            Logger.Error(Log("[{0}] Protocol handler not registered for {1}.", SessionId, typeof(T).FullName));
+            Logger.Debug(Log("[{0}] Protocol handler not registered for {1}.", SessionId, typeof(T).FullName));
             throw new NotSupportedException($"Protocol handler not registered for { typeof(T).FullName }.");
         }
 
@@ -142,7 +188,16 @@ namespace Energistics.Common
         /// </returns>
         public bool CanHandle<T>() where T : IProtocolHandler
         {
-            return Handlers.ContainsKey(typeof(T));
+            try
+            {
+                _handlersLock.TryEnterReadLock(-1);
+
+                return HandlersByType.ContainsKey(typeof(T));
+            }
+            finally
+            {
+                _handlersLock.ExitReadLock();
+            }
         }
 
         /// <summary>
@@ -150,15 +205,26 @@ namespace Energistics.Common
         /// </summary>
         /// <param name="requestedProtocols">The requested protocols.</param>
         /// <param name="supportedProtocols">The supported protocols.</param>
-        public override void OnSessionOpened(IList<SupportedProtocol> requestedProtocols, IList<SupportedProtocol> supportedProtocols)
+        public override void OnSessionOpened(IList<ISupportedProtocol> requestedProtocols, IList<ISupportedProtocol> supportedProtocols)
         {
+            Logger.Trace($"[{SessionId}] OnSessionOpened");
             HandleUnsupportedProtocols(supportedProtocols);
 
-            // notify protocol handlers about new session
-            foreach (var item in Handlers)
+            try
             {
-                if (item.Key is Type)
-                    item.Value.OnSessionOpened(requestedProtocols, supportedProtocols);
+                _handlersLock.TryEnterReadLock(-1);
+
+                var handlers = HandlersByType.Values.ToList();
+
+                // notify protocol handlers about new session
+                foreach (var handler in handlers)
+                {
+                    handler.OnSessionOpened(requestedProtocols, supportedProtocols);
+                }
+            }
+            finally
+            {
+                _handlersLock.ExitReadLock();
             }
         }
 
@@ -167,11 +233,23 @@ namespace Energistics.Common
         /// </summary>
         public override void OnSessionClosed()
         {
-            // notify protocol handlers about closed session
-            foreach (var item in Handlers)
+            Logger.Trace($"[{SessionId}] OnSessionClosed");
+
+            try
             {
-                if (item.Key is Type)
-                    item.Value.OnSessionClosed();
+                _handlersLock.TryEnterReadLock(-1);
+
+                var handlers = HandlersByType.Values.ToList();
+
+                // notify protocol handlers about new session
+                foreach (var handler in handlers)
+                {
+                    handler.OnSessionClosed();
+                }
+            }
+            finally
+            {
+                _handlersLock.ExitReadLock();
             }
         }
 
@@ -201,17 +279,19 @@ namespace Energistics.Common
         /// <param name="body">The body.</param>
         /// <param name="onBeforeSend">Action called just before sending the message with the actual header having the definitive message ID.</param>
         /// <returns>The message identifier.</returns>
-        public long SendMessage<T>(MessageHeader header, T body, Action<MessageHeader> onBeforeSend = null) where T : ISpecificRecord
+        public long SendMessage<T>(IMessageHeader header, T body, Action<IMessageHeader> onBeforeSend = null) where T : ISpecificRecord
         {
             try
             {
                 // Lock to ensure only one thread at a time attempts to send data and to ensure that messages are sent with sequential IDs
-                lock (_sendLock)
+                try
                 {
+                    _sendLock.Wait();
+
                     if (!IsOpen)
                     {
                         Log("Warning: Sending on a session that is not open.");
-                        Logger.Warn("Sending on a session that is not open.");
+                        Logger.Debug("Sending on a session that is not open.");
                         return -1;
                     }
 
@@ -221,25 +301,31 @@ namespace Energistics.Common
                     // Must be invoked before sending to ensure the response is not asynchronously processed before this method returns.
                     onBeforeSend?.Invoke(header);
 
+                    // Log message just before it gets sent if needed.
+                    Sending(header, body);
+
                     if (IsJsonEncoding)
                     {
-                        var message = this.Serialize(new object[] {header, body});
-                        Send(message);
+                        var message = EtpExtensions.Serialize(new object[] {header, body});
+                        SendAsync(message).Wait();
                     }
                     else
                     {
-                        var data = body.Encode(header);
-                        Send(data, 0, data.Length);
+                        var data = body.Encode(header, SupportedCompression);
+                        SendAsync(data, 0, data.Length).Wait();
                     }
+                }
+                finally
+                {
+                    _sendLock.Release();
                 }
             }
             catch (Exception ex)
             {
+                // Handler already locked by the calling code...
                 return Handler(header.Protocol)
                     .ProtocolException((int) EtpErrorCodes.InvalidState, ex.Message, header.MessageId);
             }
-
-            Sent(header, body);
 
             return header.MessageId;
         }
@@ -247,35 +333,19 @@ namespace Energistics.Common
         /// <summary>
         /// Gets the supported protocols.
         /// </summary>
-        /// <param name="isSender">if set to <c>true</c> the current session is the sender.</param>
         /// <returns>A list of supported protocols.</returns>
-        public IList<SupportedProtocol> GetSupportedProtocols(bool isSender = false)
+        public IList<ISupportedProtocol> GetSupportedProtocols()
         {
-            var supportedProtocols = new List<SupportedProtocol>();
-            var version = new Datatypes.Version()
+            try
             {
-                Major = 1,
-                Minor = 1
-            };
+                _handlersLock.TryEnterReadLock(-1);
 
-            // Skip Core protocol (0)
-            foreach (var handler in Handlers.Values.Where(x => x.Protocol > 0))
-            {
-                var role = isSender ? handler.RequestedRole : handler.Role;
-
-                if (supportedProtocols.Contains(handler.Protocol, role))
-                    continue;
-
-                supportedProtocols.Add(new SupportedProtocol()
-                {
-                    Protocol = handler.Protocol,
-                    ProtocolVersion = version,
-                    ProtocolCapabilities = handler.GetCapabilities(),
-                    Role = role
-                });
+                return Adapter.GetSupportedProtocols(HandlersByType.Values.ToList(), IsClient);
             }
-
-            return supportedProtocols;
+            finally
+            {
+                _handlersLock.ExitReadLock();
+            }
         }
 
         /// <summary>
@@ -293,18 +363,44 @@ namespace Energistics.Common
         /// <param name="reason">The reason.</param>
         public void Close(string reason)
         {
+            CloseAsync(reason).Wait();
+        }
+
+        /// <summary>
+        /// Asynchronously closes the WebSocket connection for the specified reason.
+        /// </summary>
+        /// <param name="reason">The reason.</param>
+        public async Task CloseAsync(string reason)
+        {
             // Closing sends messages over the websocket so need to ensure no other messages are being sent when closing
-            lock (_sendLock)
+            try
             {
-                CloseCore(reason);
+                await _sendLock.WaitAsync();
+                Logger.Trace($"Closing Session: {reason}");
+
+                await CloseAsyncCore(reason);
+            }
+            finally
+            {
+                _sendLock.Release();
             }
         }
 
         /// <summary>
-        /// Closes the WebSocket connection for the specified reason.
+        /// Resolves the ETP adapter.
+        /// </summary>
+        /// <param name="version">The ETP version.</param>
+        /// <returns>A new <see cref="IEtpAdapter"/> instance.</returns>
+        private static IEtpAdapter ResolveEtpAdapter(EtpVersion version)
+        {
+            return version == EtpVersion.v12 ? (IEtpAdapter)new v12.Etp12Adapter() : (IEtpAdapter)new v11.Etp11Adapter();
+        }
+
+        /// <summary>
+        /// Asynchronously closes the WebSocket connection for the specified reason.
         /// </summary>
         /// <param name="reason">The reason.</param>
-        protected abstract void CloseCore(string reason);
+        protected abstract Task CloseAsyncCore(string reason);
 
         /// <summary>
         /// Sends the specified data.
@@ -312,13 +408,13 @@ namespace Energistics.Common
         /// <param name="data">The data.</param>
         /// <param name="offset">The offset.</param>
         /// <param name="length">The length.</param>
-        protected abstract void Send(byte[] data, int offset, int length);
+        protected abstract Task SendAsync(byte[] data, int offset, int length);
 
         /// <summary>
         /// Sends the specified messages.
         /// </summary>
         /// <param name="message">The message.</param>
-        protected abstract void Send(string message);
+        protected abstract Task SendAsync(string message);
 
         /// <summary>
         /// Decodes the specified data.
@@ -331,16 +427,35 @@ namespace Energistics.Common
                 // create avro binary decoder to read from memory stream
                 var decoder = new BinaryDecoder(inputStream);
                 // deserialize the header
-                var header = decoder.Decode<MessageHeader>(null);
+                var header = Adapter.DecodeMessageHeader(decoder, null);
 
                 // log message metadata
-                if (Logger.IsDebugEnabled)
+                if (Logger.IsVerboseEnabled())
                 {
-                    Logger.DebugFormat("[{0}] Message received: {1}", SessionId, this.Serialize(header));
+                    Logger.VerboseFormat("[{0}] Binary message received: {1}", SessionId, EtpExtensions.Serialize(header));
                 }
 
-                // call processing action
-                HandleMessage(header, decoder, null);
+                Stream gzip = null;
+
+                try
+                {
+                    // decompress message body if compression has been negotiated
+                    if (header.CanCompressMessageBody(true))
+                    {
+                        if (EtpExtensions.GzipEncoding.Equals(SupportedCompression, StringComparison.InvariantCultureIgnoreCase))
+                        {
+                            gzip = new GZipStream(inputStream, CompressionMode.Decompress, true);
+                            decoder = new BinaryDecoder(gzip);
+                        }
+                    }
+
+                    // call processing action
+                    HandleMessage(header, decoder, null);
+                }
+                finally
+                {
+                    gzip?.Dispose();
+                }
             }
         }
 
@@ -356,13 +471,13 @@ namespace Energistics.Common
             var body = array[1].ToString();
 
             // log message metadata
-            if (Logger.IsDebugEnabled)
+            if (Logger.IsVerboseEnabled())
             {
-                Logger.DebugFormat("[{0}] Message received: {1}", SessionId, header);
+                Logger.VerboseFormat("[{0}] JSON message received: {1}", SessionId, header);
             }
-
+            
             // call processing action
-            HandleMessage(this.Deserialize<MessageHeader>(header), null, body);
+            HandleMessage(Adapter.DeserializeMessageHeader(header), null, body);
         }
 
         /// <summary>
@@ -371,28 +486,55 @@ namespace Energistics.Common
         /// <param name="header">The header.</param>
         /// <param name="decoder">The decoder.</param>
         /// <param name="body">The body.</param>
-        protected void HandleMessage(MessageHeader header, Decoder decoder, string body)
+        protected void HandleMessage(IMessageHeader header, Decoder decoder, string body)
         {
-            if (Handlers.ContainsKey(header.Protocol))
+            IProtocolHandler handler = null;
+
+            try
             {
-                var handler = Handler(header.Protocol);
+                _handlersLock.TryEnterReadLock(-1);
+
+                HandlersByProtocol.TryGetValue(header.Protocol, out handler);
+
+                if (handler == null)
+                {
+                    HandlersByProtocol.TryGetValue((int)v11.Protocols.Core, out handler);
+
+                    if (handler == null) // Socket has been closed
+                    {
+                        Logger.Trace($"Ignoring message on closed session: {EtpExtensions.Serialize(header)}");
+                        return;
+                    }
+                    var message = $"Protocol handler not registered for protocol { header.Protocol }.";
+                    handler?.ProtocolException((int)EtpErrorCodes.UnsupportedProtocol, message, header.MessageId);
+
+                    return;
+                }
 
                 try
                 {
+                    // Handle global Acknowledge request
+                    if (header.IsAcknowledgeRequested())
+                    {
+                        handler.Acknowledge(header.MessageId);
+                    }
+
+                    if (Logger.IsVerboseEnabled())
+                    {
+                        Logger.Verbose($"[{SessionId}] Handling message with {handler.GetType()}; Message: {EtpExtensions.Serialize(header)}");
+                    }
+
                     handler.HandleMessage(header, decoder, body);
                 }
                 catch (Exception ex)
                 {
-                    Logger.Error(ex);
+                    Logger.Debug(ex);
                     handler.ProtocolException((int)EtpErrorCodes.InvalidState, ex.Message, header.MessageId);
                 }
             }
-            else
+            finally
             {
-                var message = $"Protocol handler not registered for protocol { header.Protocol }.";
-
-                Handler((int)Protocols.Core)
-                    .ProtocolException((int)EtpErrorCodes.UnsupportedProtocol, message, header.MessageId);
+                _handlersLock.ExitReadLock();
             }
         }
 
@@ -410,8 +552,8 @@ namespace Energistics.Common
             if (handler != null)
             {
                 handler.Session = this;
-                Handlers[contractType] = handler;
-                Handlers[handler.Protocol] = handler;
+                HandlersByType[contractType] = handler;
+                HandlersByProtocol[handler.Protocol] = handler;
             }
         }
 
@@ -423,12 +565,20 @@ namespace Energistics.Common
         /// <exception cref="System.NotSupportedException"></exception>
         protected IProtocolHandler Handler(int protocol)
         {
-            if (Handlers.ContainsKey(protocol))
+            try
             {
-                return Handlers[protocol];
+                _handlersLock.TryEnterReadLock(-1);
+
+                IProtocolHandler handler;
+                if (HandlersByProtocol.TryGetValue(protocol, out handler))
+                    return handler;
+            }
+            finally
+            {
+                _handlersLock.ExitReadLock();
             }
 
-            Logger.Error(Log("[{0}] Protocol handler not registered for protocol {1}.", SessionId, protocol));
+            Logger.Debug(Log("[{0}] Protocol handler not registered for protocol {1}.", SessionId, protocol));
             throw new NotSupportedException($"Protocol handler not registered for protocol { protocol }.");
         }
 
@@ -436,24 +586,33 @@ namespace Energistics.Common
         /// Handles the unsupported protocols.
         /// </summary>
         /// <param name="supportedProtocols">The supported protocols.</param>
-        protected virtual void HandleUnsupportedProtocols(IList<SupportedProtocol> supportedProtocols)
+        protected virtual void HandleUnsupportedProtocols(IList<ISupportedProtocol> supportedProtocols)
         {
             // remove unsupported handler mappings (excluding Core protocol)
-            Handlers
-                .Where(x => x.Value.Protocol > 0 && !supportedProtocols.Contains(x.Value.Protocol, x.Value.Role))
-                .ToList()
-                .ForEach(x =>
-                {
-                    x.Value.Session = null;
-                    Handlers.Remove(x.Key);
-                    Handlers.Remove(x.Value.Protocol);
-                });
-
-            // update remaining handler mappings by protocol
-            foreach (var handler in Handlers.Values.ToArray())
+            try
             {
-                if (!Handlers.ContainsKey(handler.Protocol))
-                    Handlers[handler.Protocol] = handler;
+                _handlersLock.TryEnterReadLock(-1);
+
+                HandlersByType
+                    .Where(x => x.Value.Protocol > 0 && !supportedProtocols.Contains(x.Value.Protocol, x.Value.Role))
+                    .ToList()
+                    .ForEach(x =>
+                    {
+                        x.Value.Session = null;
+                        HandlersByType.Remove(x.Key);
+                        HandlersByProtocol.Remove(x.Value.Protocol);
+                    });
+
+                // update remaining handler mappings by protocol
+                foreach (var handler in HandlersByType.Values.ToArray())
+                {
+                    if (!HandlersByProtocol.ContainsKey(handler.Protocol))
+                        HandlersByProtocol[handler.Protocol] = handler;
+                }
+            }
+            finally
+            {
+                _handlersLock.ExitReadLock();
             }
         }
 
@@ -463,18 +622,20 @@ namespace Energistics.Common
         /// <typeparam name="T">The type of message.</typeparam>
         /// <param name="header">The header.</param>
         /// <param name="body">The message body.</param>
-        protected void Sent<T>(MessageHeader header, T body)
+        protected void Sending<T>(IMessageHeader header, T body)
         {
+            var now = DateTime.Now;
             if (Output != null)
             {
-                Log("[{0}] Message sent at {1}", SessionId, DateTime.Now.ToString(TimestampFormat));
-                Log(this.Serialize(header));
-                Log(this.Serialize(body, true));
+                Log("[{0}] Sending message at {1}", SessionId, now.ToString(TimestampFormat));
+                Log(EtpExtensions.Serialize(header));
+                Log(EtpExtensions.Serialize(body, true));
             }
 
-            if (Logger.IsDebugEnabled)
+            if (Logger.IsVerboseEnabled())
             {
-                Logger.DebugFormat("[{0}] Message sent: {1}", SessionId, this.Serialize(header));
+                Logger.VerboseFormat("[{0}] Sending message at {1}: {2}{3}{4}",
+                    SessionId, now.ToString(TimestampFormat), EtpExtensions.Serialize(header), Environment.NewLine, EtpExtensions.Serialize(body, true));
             }
         }
 
@@ -489,13 +650,26 @@ namespace Energistics.Common
         {
             if (disposing)
             {
-                var handlers = Handlers
-                    .Where(x => x.Key is int)
-                    .Select(x => x.Value)
-                    .OfType<IDisposable>();
+                IEnumerable<IProtocolHandler> handlers;
 
-                foreach (var handler in handlers)
-                    handler.Dispose();
+                try
+                {
+                    _handlersLock.TryEnterWriteLock(-1);
+
+                    handlers = HandlersByType.Values.ToList();
+
+                    HandlersByType.Clear();
+                    HandlersByProtocol.Clear();
+
+                    foreach (var handler in handlers)
+                    {
+                        handler.Dispose();
+                    }
+                }
+                finally
+                {
+                    _handlersLock.ExitWriteLock();
+                }
             }
 
             base.Dispose(disposing);

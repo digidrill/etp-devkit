@@ -1,7 +1,7 @@
 ﻿//----------------------------------------------------------------------- 
-// ETP DevKit, 1.1
+// ETP DevKit, 1.2
 //
-// Copyright 2016 Energistics
+// Copyright 2018 Energistics
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,13 +18,14 @@
 
 using System;
 using System.IO;
-using Energistics.Common;
-using Energistics.Protocol.ChannelStreaming;
-using Energistics.Providers;
-using Energistics.Protocol.Discovery;
+using Energistics.Etp.Common;
+using Energistics.Etp.Providers;
+using Energistics.Etp.v11.Protocol.Discovery;
+using Energistics.Etp.v11.Protocol.ChannelStreaming;
 using log4net.Config;
+using Energistics.Etp.WebSocket4Net;
 
-namespace Energistics
+namespace Energistics.Etp
 {
     public class Program
     {
@@ -73,7 +74,7 @@ namespace Energistics
             Console.WriteLine(" X - exit");
             Console.WriteLine();
 
-            using (var server = new EtpSocketServer(WebSocketPort, ServerAppName, AppVersion))
+            using (var server = new EtpSelfHostedWebServer(WebSocketPort, ServerAppName, AppVersion))
             {
                 // Register protocol handlers
                 server.Register<IDiscoveryStore, MockResourceProvider>();
@@ -119,7 +120,7 @@ namespace Energistics
             Console.WriteLine(" D - Discovery - GetResources");
             Console.WriteLine();
 
-            using (var client = new EtpClient(webSocketUri, ClientAppName, AppVersion))
+            using (var client = EtpFactory.CreateClient(webSocketUri, ClientAppName, AppVersion, EtpSettings.EtpSubProtocolName))
             {
                 client.Register<IChannelStreamingConsumer, MockChannelStreamingConsumer>();
                 client.Register<IDiscoveryCustomer, DiscoveryCustomerHandler>();
@@ -169,7 +170,7 @@ namespace Energistics
 
         private static void OnGetResourcesResponse(object sender, ProtocolEventArgs<GetResourcesResponse> e)
         {
-            Console.WriteLine(((EtpBase)sender).Serialize(e.Message.Resource, true));
+            Console.WriteLine(EtpExtensions.Serialize(e.Message.Resource, true));
         }
 
         private static bool IsKey(ConsoleKeyInfo info, string key)

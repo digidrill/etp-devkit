@@ -1,7 +1,7 @@
 ﻿//----------------------------------------------------------------------- 
-// ETP DevKit, 1.1
+// ETP DevKit, 1.2
 //
-// Copyright 2016 Energistics
+// Copyright 2018 Energistics
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@
 
 using System.ComponentModel;
 
-namespace Energistics
+namespace Energistics.Etp
 {
     /// <summary>
     /// Enumeration of ETP error codes.
@@ -64,6 +64,12 @@ namespace Energistics
         /// <summary>ELIMIT_EXCEEDED</summary>
         [Description("ELIMIT_EXCEEDED")]
         LimitExceeded = 12,
+        /// <summary>ECOMPRESSION_NOTSUPPORTED</summary>
+        [Description("ECOMPRESSION_NOTSUPPORTED")]
+        CompressionNotSupported = 13,
+        /// <summary>EINVALID_OBJECT</summary>
+        [Description("EINVALID_OBJECT")]
+        InvalidObject = 14,
 
         /// <summary>EINVALID_CHANNELID</summary>
         [Description("EINVALID_CHANNELID")]
@@ -71,18 +77,26 @@ namespace Energistics
 
         /// <summary>EUNSUPPORTED_OBJECT</summary>
         [Description("EUNSUPPORTED_OBJECT")]
-        UnsupportedObject = 3001,
-        /// <summary>EINVALID_OBJECT</summary>
-        [Description("EINVALID_OBJECT")]
-        InvalidObject = 3002,
+        UnsupportedObject = 4001,
+        /// <summary>EINVALID_OBJECT_X</summary>
+        [Description("EINVALID_OBJECT_X")]
+        InvalidObjectX = 4002,
         /// <summary>ENOCASCADE_DELETE</summary>
         [Description("ENOCASCADE_DELETE")]
-        NoCascadeDelete = 3003,
+        NoCascadeDelete = 4003,
         /// <summary>EPLURAL_OBJECT</summary>
         [Description("EPLURAL_OBJECT")]
-        NoPluralObject = 3004,
+        NoPluralObject = 4004,
         /// <summary>EGROWING_PORTION_IGNORED</summary>
         [Description("EPLURAL_OBJECT")]
-        GrowingPortionIgnored = 3005
+        GrowingPortionIgnored = 4005,
+
+        /// <summary>ERETENTION_PERIOD_EXCEEDED</summary>
+        [Description("ERETENTION_PERIOD_EXCEEDED")]
+        RetentionPeriodExceeded = 5001,
+
+        /// <summary>ENOTGROWINGOBJECT</summary>
+        [Description("ENOTGROWINGOBJECT")]
+        NotGrowingObjct = 6001
     }
 }
